@@ -5,4 +5,6 @@ Will only be used for running on old demos so this program doesn't really have a
 
 Feel free to do whatever under the license, I appreciate pull requests.
 
+Thanks a lot to https://github.com/markus-wa/ who created the parser of the demos that I'm using.
+
 MIT License
