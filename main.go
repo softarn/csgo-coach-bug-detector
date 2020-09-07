@@ -70,9 +70,14 @@ func parseFile(f *os.File) string {
 	var isInRound bool
 	var matchEnded bool
 	var spectators []*common.Player
-	positions := make(map[string]map[string]*PositionInfo)
 
-	output += "Result for file: " + f.Name() + "\n"
+	// StaticPositions by Name and PositionKey (Coordinates CTscore Tscore)
+	positionsByNameAndPosKey := make(map[string]map[string]*StaticPositionInfo)
+
+	// FollowPositionList by Name
+	positionsListByName := make(map[string][]FollowPositionInfo)
+
+	output += "___Result for file: " + f.Name() + "___\n"
 
 	// Register handler on kill events
 	p.RegisterEventHandler(func(e events.RoundFreezetimeEnd) {
@@ -85,10 +90,11 @@ func parseFile(f *os.File) string {
 		}
 	})
 
-	//p.RegisterEventHandler(func(e events.GenericGameEvent) {
-	//fmt.Println("Tick: " + strconv.Itoa(p.GameState().IngameTick()))
-
-	//})
+	p.RegisterEventHandler(func(e events.PlayerConnect) {
+		if isInRound && e.Player.Team == 1 {
+			spectators = append(spectators, e.Player)
+		}
+	})
 
 	p.RegisterEventHandler(func(e events.RoundEnd) {
 		isInRound = false
@@ -102,61 +108,113 @@ func parseFile(f *os.File) string {
 		}
 
 		if err != nil {
-			fmt.Println("Parser got error")
+			panic(err)
 		}
 
-		if isInRound && p.GameState().IngameTick() % 10 == 0 {
-			analyzeCamPos(p.GameState(), &spectators, positions)
+		if isInRound {
+			analyzeCamPos(p.GameState(), &spectators, positionsByNameAndPosKey, positionsListByName)
 		}
 	}
 
-	for name, positionMap := range positions {
+	output += fmt.Sprintf("__Result for static positions__\n")
+	for name, positionMap := range positionsByNameAndPosKey {
 		for _, positionInfo := range positionMap {
-			if positionInfo.times > 40 {
+			if positionInfo.times > 200 {
 				output += fmt.Sprintf("%s has been in this pos %d times\n Info: %#v\n", name, positionInfo.times, positionInfo)
 			}
 		}
 	}
 
-	output += "\n\n"
+	roundNumberFlagsByName := analyzeFollowPositions(positionsListByName)
+
+	output += fmt.Sprintf("\n__Result for third person view__\n")
+	for name, flagsByRoundNumber := range roundNumberFlagsByName {
+		for roundNumber, flags := range flagsByRoundNumber {
+			if flags > 200 {
+				output += fmt.Sprintf("%s has %d flags in round %d \n", name, flags, roundNumber)
+			}
+		}
+	}
+
+	output += "\n\n\n"
 	
 	return output
 }
 
-func analyzeCamPos(gameState dem.GameState, spectators *[]*common.Player, positions map[string]map[string]*PositionInfo) {
-	for _, spectator := range *spectators {
-		player := gameState.Participants().ByUserID()[spectator.UserID]
+func analyzeFollowPositions(followPositionsByName map[string][]FollowPositionInfo) map[string]map[int]int {
+	roundNumberFlagByName := make(map[string]map[int]int)
 
-		if player == nil {
+	for name, infos := range followPositionsByName {
+		roundNumberFlagByName[name] = make(map[int]int)
+
+		for _, info := range infos {
+			roundNumber := info.ctScore + info.tScore + 1
+
+			if info.xDiff + info.yDiff > 30 {
+				roundNumberFlagByName[name][roundNumber]++
+			}
+		}
+	}
+
+	return roundNumberFlagByName
+}
+
+func analyzeCamPos(gameState dem.GameState, spectators *[]*common.Player, positionsByNameAndPosKey map[string]map[string]*StaticPositionInfo, positionsListByName map[string][]FollowPositionInfo) {
+	for _, spectator := range *spectators {
+		activeSpectator := gameState.Participants().ByUserID()[spectator.UserID]
+
+		if activeSpectator == nil {
 			continue
 		}
 
-		spectatorPosition := player.Position()
-		//fmt.Printf("%s : %s\n", spectator.Name, spectatorPosition)
+		if !activeSpectator.IsConnected {
+			continue
+		}
+
+		spectatorPosition := activeSpectator.Position()
 
 		isPlayerPosition := false
 		for _, player := range gameState.Participants().Playing() {
-			if player.Position() == spectatorPosition {
+
+			posDistance := player.Position().Distance(spectatorPosition)
+
+			if posDistance < 1 && player.IsAlive() {
+				xDiff := calculateDiff(player.ViewDirectionX(), activeSpectator.ViewDirectionX())
+				yDiff := calculateDiff(player.ViewDirectionY(), activeSpectator.ViewDirectionY())
+
+				if xDiff > 1 || yDiff > 1 {
+					positionsListByName[spectator.Name] = append(positionsListByName[spectator.Name], FollowPositionInfo{
+						position:      spectatorPosition,
+						spectatorName: spectator.Name,
+						playerName:    player.Name,
+						ctScore:       gameState.TeamCounterTerrorists().Score(),
+						tScore:        gameState.TeamTerrorists().Score(),
+						tick:          gameState.IngameTick(),
+						xDiff:         xDiff,
+						yDiff:         yDiff,
+					})
+				}
+
 				isPlayerPosition = true
 				break
 			}
 		}
 
 		if isPlayerPosition {
-			continue;
+			continue
 		}
 
-		if positions[spectator.Name] == nil {
-			positions[spectator.Name] = make(map[string]*PositionInfo)
+		if positionsByNameAndPosKey[spectator.Name] == nil {
+			positionsByNameAndPosKey[spectator.Name] = make(map[string]*StaticPositionInfo)
 		}
 
 		posKey := fmt.Sprintf("%s%d%d", spectatorPosition, gameState.TeamTerrorists().Score(), gameState.TeamCounterTerrorists().Score())
-		info, ok := positions[spectator.Name][posKey]
+		info, ok := positionsByNameAndPosKey[spectator.Name][posKey]
 
 		if !ok {
-			positions[spectator.Name][posKey] = &PositionInfo{
-				position: spectatorPosition,
-				steamId: fmt.Sprintf("%d", spectator.SteamID64),
+			positionsByNameAndPosKey[spectator.Name][posKey] = &StaticPositionInfo{
+				position:  spectatorPosition,
+				steamId:   fmt.Sprintf("%d", spectator.SteamID64),
 				times:     1,
 				ctScore:   gameState.TeamCounterTerrorists().Score(),
 				tScore:    gameState.TeamTerrorists().Score(),
@@ -167,10 +225,40 @@ func analyzeCamPos(gameState dem.GameState, spectators *[]*common.Player, positi
 			info.times = info.times + 1
 			info.lastTick = gameState.IngameTick()
 		}
+
 	}
 }
 
-type PositionInfo struct {
+func calculateDiff(a1 float32, a2 float32) int {
+	aDiff := absInt(int(a1 - a2))
+
+	if aDiff > 180 {
+		return absInt(aDiff - 360)
+	} else {
+		return aDiff
+	}
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+type FollowPositionInfo struct {
+	position      r3.Vector
+	spectatorName string
+	playerName    string
+	distance      float64
+	ctScore       int
+	tScore        int
+	tick          int
+	xDiff         int
+	yDiff         int
+}
+
+type StaticPositionInfo struct {
 	position r3.Vector
 	steamId string
 	times int
